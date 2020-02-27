@@ -8,20 +8,18 @@ import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.server.Directives._
 import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.server.directives.RouteDirectives.complete
-import akka.stream.scaladsl.Flow
 import akka.util.ByteString
 import com.google.inject.{Guice, Inject}
 import config.{Db, DiModule}
 import dao.{UserDAO, UserGroupsDAO}
-import io.pileworx.akka.http.rest.hal.Link
 import io.swagger.annotations._
 import javax.ws.rs.Path
 import org.slf4j.LoggerFactory
-import akka.NotUsed
-import akka.stream.scaladsl.Source
+import org.apache.activemq.ActiveMQConnectionFactory
+import javax.jms.Session
+import org.apache.log4j.BasicConfigurator
 
-import scala.concurrent.{Await, ExecutionContext, Future}
-import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext
 
 case class UsersDTO(id: Option[Int], firstName: String, lastName: String, createdAt: Option[String], isActive: Boolean)
 
@@ -61,6 +59,8 @@ trait JsonSupport extends SprayJsonSupport with DefaultJsonProtocol {
 class UsersController @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbConfig: Db) extends JsonSupport {
 
   lazy val logger = LoggerFactory.getLogger(classOf[UsersController])
+  BasicConfigurator.configure()
+
   val newline = ByteString("\n")
   implicit val ec: ExecutionContext = ExecutionContext.global
   implicit val jsonStreamingSupport: JsonEntityStreamingSupport =
@@ -73,6 +73,10 @@ class UsersController @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, 
 
   val injector = Guice.createInjector(new DiModule())
   val service = injector.getInstance(classOf[UsersService])
+
+
+
+
 
   @ApiOperation(value = "Get all users", httpMethod = "GET", response = classOf[UsersDTO])
   @ApiResponses(Array(

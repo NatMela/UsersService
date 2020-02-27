@@ -18,9 +18,13 @@ import diffson.diff
 import diffson.lcs.Patience
 import diffson._
 import diffson.jsonpatch.lcsdiff._
+import javax.jms.{Session, TextMessage}
+import org.apache.activemq.ActiveMQConnectionFactory
 import slick.jdbc.{ResultSetConcurrency, ResultSetType}
 
-class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbConfig: Db) extends JsonSupport{
+import scala.util.{Failure, Success}
+
+class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbConfig: Db) extends JsonSupport {
 
   lazy val log = LoggerFactory.getLogger(classOf[UsersService])
   implicit val ec = ExecutionContext.global
@@ -28,11 +32,61 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
   implicit val lcs = new Patience[JsValue]
 
   val maxNumberOfGroups = 16
+  val connFactory = new ActiveMQConnectionFactory()
+  val conn = connFactory.createConnection()
+  val session = conn.createSession(false, Session.AUTO_ACKNOWLEDGE)
+  val destUsersServer = session.createQueue("users_server")
+  val destUsersClient = session.createQueue("users_client")
+  val destGroupsServer = session.createQueue("groups_server")
+  val destGroupsClient = session.createQueue("groups_client")
+
+  val usersServer = session.createProducer(destUsersServer)
+  val usersClient = session.createConsumer(destUsersClient)
+  val groupsServer = session.createConsumer(destGroupsServer)
+  val groupsClient = session.createProducer(destGroupsClient)
+
+
+  conn.start()
+
+  def convertStrToInt(str: String): Option[Int] = {
+    try {
+      val result = str.toInt
+      Option(result)
+    } catch {
+      case e: Throwable => None
+    }
+  }
+
+  val listener = Future {
+    while (true) {
+      val message = groupsServer.receive()
+      if (message.isInstanceOf[TextMessage]) {
+        val s = message.asInstanceOf[TextMessage].getText
+        s match {
+          case msg if convertStrToInt(msg).isDefined =>
+            val resultF = getUsersForGroup(msg.toInt)
+            resultF.map(result => {
+              groupsClient.send(session.createTextMessage(result.toString))
+            })
+          case _ =>
+            Seq.empty[UsersDTO]
+        }
+        println("Received text:" + s)
+      } else {
+        println("Received unknown")
+      }
+    }
+  }
+
+  listener.onComplete {
+    case Success(value) => println(s"Got the callback, value = $value")
+    case Failure(e) => println(s"D'oh! The task failed: ${e.getMessage}")
+  }
 
   def getUsersStream() = {
     val result = dbConfig.db().stream(userDAO.getUsers()).mapResult {
       usersRow =>
-          UsersDTO(id = usersRow.id, firstName = usersRow.firstName, lastName = usersRow.lastName, createdAt = Some(usersRow.createdAt.toString), isActive = usersRow.isActive)
+        UsersDTO(id = usersRow.id, firstName = usersRow.firstName, lastName = usersRow.lastName, createdAt = Some(usersRow.createdAt.toString), isActive = usersRow.isActive)
     }
     Source.fromPublisher(result)
   }
@@ -53,6 +107,14 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
     }
   }
 
+  def getUsersForGroup(groupId: Int): Future[Seq[UsersDTO]] = {
+    val usersIdsForGroupF = dbConfig.db().run(userGroupsDAO.getAllUsersForGroup(groupId))
+    usersIdsForGroupF.flatMap(usersId => dbConfig.db().run(userDAO.getUsersByIds(usersId)).map {
+      usersRows =>
+        usersRows.map(userRow => UsersDTO(id = userRow.id, firstName = userRow.firstName, lastName = userRow.lastName, createdAt = Some(userRow.createdAt.toString), isActive = userRow.isActive))
+    })
+  }
+
   def getDetailsForUser(userId: Int): Future[Option[UserWithGroupsDTO]] = {
     val userF: Future[Option[UsersDTO]] = dbConfig.db.run(userDAO.getUserById(userId)).map {
       userRows =>
@@ -63,27 +125,44 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
           case Some(userRow) => Some(UsersDTO(id = userRow.id, firstName = userRow.firstName, lastName = userRow.lastName, createdAt = Some(userRow.createdAt.toString), isActive = userRow.isActive))
         }
     }
-  /*  val groupsIdsForUserF = dbConfig.db().run(userGroupsDAO.getAllGroupsForUser(userId))
-    val groupsF = groupsIdsForUserF.flatMap(groupId => dbConfig.db().run(groupsDAO.getGroupsByIds(groupId)).map {
-      groupsRows =>
-        groupsRows.map(groupsRow => GroupsDTO(id = groupsRow.id, title = groupsRow.title, createdAt = Some(groupsRow.createdAt.toString), description = groupsRow.description))
-    })
-    val seqF = for {
-      user <- userF
-      groups <- groupsF
-    } yield (user, groups)
-    seqF.map { result =>
-      val (user, groups) = result
-      user match {
-        case None =>
-          log.warn("Can't get details about user as there is no user with id {} ", userId)
-          None
-        case Some(user) => {
-          log.info("Details for user with id {} were found", userId)
-          Some(UserWithGroupsDTO(user, groups))
+
+    val msg = session.createTextMessage(s"$userId")
+    usersServer.send(msg)
+    usersClient.setMessageListener(null)
+    log.info("sent message")
+    println("sent message")
+    val answer = usersClient.receive(1000) //.asInstanceOf[TextMessage].getText
+    log.info(s"receive answer ${answer}")
+
+    val result = answer match {
+      case message: TextMessage =>
+        println(s"receive answer ${message.getText}")
+        Future.successful(message.getText)
+
+      case _ =>
+        Future.successful("NotTextMessage")
+    }
+    /*  val groupsIdsForUserF = dbConfig.db().run(userGroupsDAO.getAllGroupsForUser(userId))
+      val groupsF = groupsIdsForUserF.flatMap(groupId => dbConfig.db().run(groupsDAO.getGroupsByIds(groupId)).map {
+        groupsRows =>
+          groupsRows.map(groupsRow => GroupsDTO(id = groupsRow.id, title = groupsRow.title, createdAt = Some(groupsRow.createdAt.toString), description = groupsRow.description))
+      })
+      val seqF = for {
+        user <- userF
+        groups <- groupsF
+      } yield (user, groups)
+      seqF.map { result =>
+        val (user, groups) = result
+        user match {
+          case None =>
+            log.warn("Can't get details about user as there is no user with id {} ", userId)
+            None
+          case Some(user) => {
+            log.info("Details for user with id {} were found", userId)
+            Some(UserWithGroupsDTO(user, groups))
+          }
         }
-      }
-    }*/
+      }*/
     Future.successful(None)
   }
 
@@ -135,15 +214,15 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
 
         log.info(j2.diff(j1).toString)
         val jd = diff(j1, j2)
-//        JsonPatch.diff(j1, j2)
+        //        JsonPatch.diff(j1, j2)
         log.info("User with id {} was found", userId)
-/*
-        if (!userRow.isActive && user.isActive) {
-          dbConfig.db.run(userGroupsDAO.deleteGroupsForUser(userId))
-        }
-       val date = userRow.createdAt.getOrElse(user.createdAt.get.toString)
-       val rowToUpdate = UsersRow(id = Some(userId), createdAt = java.sql.Date.valueOf(date), firstName = userRow.firstName, lastName = userRow.lastName, isActive = userRow.isActive)        dbConfig.db.run(userDAO.update(rowToUpdate)).flatMap(_ => getUserById(userId))
- */
+        /*
+                if (!userRow.isActive && user.isActive) {
+                  dbConfig.db.run(userGroupsDAO.deleteGroupsForUser(userId))
+                }
+               val date = userRow.createdAt.getOrElse(user.createdAt.get.toString)
+               val rowToUpdate = UsersRow(id = Some(userId), createdAt = java.sql.Date.valueOf(date), firstName = userRow.firstName, lastName = userRow.lastName, isActive = userRow.isActive)        dbConfig.db.run(userDAO.update(rowToUpdate)).flatMap(_ => getUserById(userId))
+         */
         Future.successful(None)
       }
       case None => {
@@ -201,40 +280,40 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
 
   def addUserToGroup(userId: Int, groupId: Int): Future[String] = {
     val userF = getUserById(userId)
-   // dbConfig.db.run(groupsDAO.getGroupById(groupId)).flatMap(groupRows =>
-     // groupRows.headOption match {
+    // dbConfig.db.run(groupsDAO.getGroupById(groupId)).flatMap(groupRows =>
+    // groupRows.headOption match {
     Option(groupId) match {
-        case Some(_) => {
-          userF.flatMap {
-            case Some(user) => {
-              if (user.isActive) {
-                needToAddUserToGroup(userId, groupId).flatMap { needToAdd =>
-                  if (needToAdd) {
-                    log.info("Add user with id {} to group with id {}", userId, groupId)
-                    val rowToInsert = UsersAndGroupsRow(None, userId, groupId)
-                    dbConfig.db.run(userGroupsDAO.insert(rowToInsert))
-                    Future.successful(s"")
-                  } else {
-                    log.warn("Don't add user to group as user with id {} is already in group with id {} or user is included for {} groups", userId, groupId, maxNumberOfGroups)
-                    Future.successful(s"Don't add user to group as user with id $userId is already in group with id $groupId or user is already included in $maxNumberOfGroups groups")
-                  }
+      case Some(_) => {
+        userF.flatMap {
+          case Some(user) => {
+            if (user.isActive) {
+              needToAddUserToGroup(userId, groupId).flatMap { needToAdd =>
+                if (needToAdd) {
+                  log.info("Add user with id {} to group with id {}", userId, groupId)
+                  val rowToInsert = UsersAndGroupsRow(None, userId, groupId)
+                  dbConfig.db.run(userGroupsDAO.insert(rowToInsert))
+                  Future.successful(s"")
+                } else {
+                  log.warn("Don't add user to group as user with id {} is already in group with id {} or user is included for {} groups", userId, groupId, maxNumberOfGroups)
+                  Future.successful(s"Don't add user to group as user with id $userId is already in group with id $groupId or user is already included in $maxNumberOfGroups groups")
                 }
-              } else {
-                log.warn("Don't add user to group as user with id {} is is nonActive", userId)
-                Future.successful(s"Don't add user to group as user with id $userId is nonActive")
               }
-            }
-            case None => {
-              log.warn("Don't add user to group as user with id {} is not exist", userId)
-              Future.successful(s"Don't add user to group as user with id $userId is not exist")
+            } else {
+              log.warn("Don't add user to group as user with id {} is is nonActive", userId)
+              Future.successful(s"Don't add user to group as user with id $userId is nonActive")
             }
           }
+          case None => {
+            log.warn("Don't add user to group as user with id {} is not exist", userId)
+            Future.successful(s"Don't add user to group as user with id $userId is not exist")
+          }
         }
-        case None => {
-          log.warn("Don't add user to group as group with id {} is not exist", groupId)
-          Future.successful(s"Don't add user to group as group with id $groupId is not exist")
-        }
-      }//)
+      }
+      case None => {
+        log.warn("Don't add user to group as group with id {} is not exist", groupId)
+        Future.successful(s"Don't add user to group as group with id $groupId is not exist")
+      }
+    } //)
   }
 
   def deleteUser(userId: Int): Future[Unit] = {
@@ -286,4 +365,5 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
     log.info(message)
     Future.successful()
   }
+
 }

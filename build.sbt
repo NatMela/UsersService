@@ -22,7 +22,6 @@ libraryDependencies += "com.typesafe.akka" %% "akka-http"   % akkaHttpVersion
 libraryDependencies += "com.typesafe.akka" %% "akka-actor"  % akkaVersion
 libraryDependencies += "com.typesafe.akka" %% "akka-stream" % akkaVersion
 libraryDependencies += "com.typesafe.akka" %% "akka-http-spray-json" % "10.1.9"
-// If testkit used, explicitly declare dependency on akka-streams-testkit in same version as akka-actor
 libraryDependencies += "com.typesafe.akka" %% "akka-http-testkit"   % akkaHttpVersion % Test
 libraryDependencies += "com.typesafe.akka" %% "akka-stream-testkit" % akkaVersion     % Test
 libraryDependencies += "net.codingwell" %% "scala-guice" % "4.2.6"
@@ -31,6 +30,7 @@ libraryDependencies += "ch.megard" %% "akka-http-cors" % "0.4.1"
 libraryDependencies += "io.pileworx" %% "akka-http-hal" % "1.2.5"
 libraryDependencies += "org.gnieh" %% f"diffson-spray-json" % "4.0.1"
 libraryDependencies += "org.typelevel" %% "cats-core" % "2.0.0"
+libraryDependencies += "org.apache.activemq" % "activemq-all" % "5.10.0"
 
 enablePlugins(FlywayPlugin)
 version := "0.0.1"
