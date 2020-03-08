@@ -1,5 +1,7 @@
 package services
 
+import java.sql.Date
+import java.text.SimpleDateFormat
 import java.time.LocalDate
 
 import akka.stream.scaladsl.Source
@@ -134,7 +136,7 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
     val answer = usersClient.receive(1000) //.asInstanceOf[TextMessage].getText
     log.info(s"receive answer ${answer}")
 
-    val result = answer match {
+    val resultF = answer match {
       case message: TextMessage =>
         println(s"receive answer ${message.getText}")
         Future.successful(message.getText)
@@ -142,28 +144,25 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
       case _ =>
         Future.successful("NotTextMessage")
     }
-    /*  val groupsIdsForUserF = dbConfig.db().run(userGroupsDAO.getAllGroupsForUser(userId))
-      val groupsF = groupsIdsForUserF.flatMap(groupId => dbConfig.db().run(groupsDAO.getGroupsByIds(groupId)).map {
-        groupsRows =>
-          groupsRows.map(groupsRow => GroupsDTO(id = groupsRow.id, title = groupsRow.title, createdAt = Some(groupsRow.createdAt.toString), description = groupsRow.description))
-      })
+
       val seqF = for {
         user <- userF
-        groups <- groupsF
-      } yield (user, groups)
-      seqF.map { result =>
-        val (user, groups) = result
+        result <- resultF
+      } yield (user, result)
+
+      seqF.map { res =>
+      val (user, result) = res
+        val groups = stringConvertToSetDTO(result,"GroupsDTO")
         user match {
           case None =>
             log.warn("Can't get details about user as there is no user with id {} ", userId)
             None
           case Some(user) => {
             log.info("Details for user with id {} were found", userId)
-            Some(UserWithGroupsDTO(user, groups))
+            Some(UserWithGroupsDTO(user, groups.toSeq))
           }
         }
-      }*/
-    Future.successful(None)
+      }
   }
 
   def getUsersFromPage(pageSize: Int, pageNumber: Int): Future[UsersFromPage] = {
@@ -231,8 +230,34 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
       }
     }
   }
+    def convertToDto(row: Seq[String]): GroupsDTO = {
+      GroupsDTO(id = strToOptionInt(row.head.tail), title = row(1), createdAt = strToOptionDate(row(2)), description =  row(3).substring(0, row(3).length - 1))
+    }
 
-  def insertUser(user: UsersDTO) = {
+    def strToOptionInt(str: String): Option[Int] = {
+      str match {
+        case string if string.substring(0, 4) == "Some" =>
+          Option(string.substring(5, string.length - 1).toInt)
+        case _ => None
+      }
+    }
+
+    def strToOptionDate(str: String): Option[String] = {
+      str match {
+        case string if string.substring(0, 4) == "Some" =>
+          Option(string.substring(5, string.length - 1))
+        case _ => None
+      }
+    }
+
+    def stringConvertToSetDTO(inputString: String, dtoName: String): Seq[GroupsDTO] = {
+      val setStrings: Seq[String] = inputString.substring(7, inputString.length - 1)
+        .split(dtoName).toSeq.tail
+      setStrings.map(row => row.split(",").toSeq)
+        .map(row => convertToDto(row))
+    }
+
+    def insertUser(user: UsersDTO) = {
     val insertedUser = UsersRow(id = user.id, firstName = user.firstName, lastName = user.lastName, isActive = user.isActive, createdAt = java.sql.Date.valueOf(LocalDate.now))
     val idF = dbConfig.db.run(userDAO.insert(insertedUser))
     idF.flatMap { id =>
@@ -365,5 +390,4 @@ class UsersService @Inject()(userDAO: UserDAO, userGroupsDAO: UserGroupsDAO, dbC
     log.info(message)
     Future.successful()
   }
-
 }
